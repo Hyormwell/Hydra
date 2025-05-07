@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Virtualenv
+.venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Build
+dist/
+build/
+
+# Data
+sessions/
+data/
