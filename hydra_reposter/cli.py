@@ -10,13 +10,16 @@ import asyncio
 from pathlib import Path
 from typing import Optional, List
 
+from hydra_reposter.core.accounts_service import LolzMarketClient, LolzApiError
+from hydra_reposter.core.proxy_service import ProxyManager, ProxyError
+
 import typer
 from rich.console import Console
 from rich.spinner import Spinner
 from rich.panel import Panel
 from rich.table import Table
 
-from hydra_reposter.core.config import settings
+from hydra_reposter.core import settings
 from hydra_reposter.utils.csv_loader import load_targets_from_csv
 from hydra_reposter.utils.metrics import get_metric, snapshot, reset_metrics
 from hydra_reposter.utils.metrics import inc_metric  # для демо-отчёта
@@ -107,6 +110,64 @@ def convert(tdata: Path = typer.Argument(..., help="Файл tdata"), out: Path 
 
 
 # --------------------------------------------------------------------------- #
+#  Sub-command group: accounts
+# --------------------------------------------------------------------------- #
+accounts_app = typer.Typer(name="accounts", help="Управление аккаунтами через LolzMarket API")
+app.add_typer(accounts_app)
+
+@accounts_app.command("buy", help="Купить N аккаунтов через LolzMarket API")
+def accounts_buy(
+    count: int = typer.Option(1, "--count", "-c", help="Количество аккаунтов для покупки")
+):
+    """
+    Покупка аккаунтов.
+    """
+    console = Console()
+    async def _buy():
+        async with LolzMarketClient() as client:
+            success = 0
+            for _ in range(count):
+                try:
+                    res = await client.fast_buy(item_id=settings.market_item_id, price=settings.market_price)
+                    console.print(f"[green]Куплен аккаунт:[/] lock_id={res['lock_id']}, item_id={res['item_id']}")
+                    success += 1
+                except LolzApiError as e:
+                    console.print(f"[red]Ошибка покупки:[/] {e}")
+            console.print(f"\n[bold green]Успешно куплено {success} из {count}[/]")
+    asyncio.run(_buy())
+
+# --------------------------------------------------------------------------- #
+#  Sub-command group: proxies
+# --------------------------------------------------------------------------- #
+proxies_app = typer.Typer(name="proxies", help="Управление прокси через ProxyManager")
+app.add_typer(proxies_app)
+
+@proxies_app.command("rotate", help="Поменять IP прокси")
+def proxies_rotate(
+    all: bool = typer.Option(False, "--all", "-a", help="Применить ко всем прокси")
+):
+    """
+    Ротация прокси.
+    """
+    console = Console()
+    async def _rotate():
+        pm = ProxyManager()
+        try:
+            if all:
+                # Ротация для всех прокси
+                await pm.rotate_all()
+                console.print("[green]Ротация всех прокси завершена успешно[/]")
+            else:
+                await pm.rotate()
+                console.print("[green]Прокси IP сменён успешно[/]")
+        except ProxyError as e:
+            console.print(f"[red]Ошибка при ротации прокси:[/] {e}")
+        finally:
+            await pm.aclose()
+    asyncio.run(_rotate())
+
+
+# --------------------------------------------------------------------------- #
 #  Root-callback: интерактивное меню
 # --------------------------------------------------------------------------- #
 @app.callback(invoke_without_command=True)
@@ -119,6 +180,7 @@ def main(ctx: typer.Context):
                   " [blue]1[/] — Запустить рассылку\n"
                   " [blue]2[/] — Проверить сессии\n"
                   " [blue]3[/] — Показать метрики\n"
+                  " [blue]4[/] — Купить аккаунты\n"
                   " [blue]0[/] — Выход")
 
     choice = typer.prompt("Номер", type=int)
@@ -131,6 +193,14 @@ def main(ctx: typer.Context):
         ctx.invoke(check_sessions)
     elif choice == 3:
         ctx.invoke(dashboard)
+    elif choice == 4:
+        # Покупка аккаунтов через LolzMarket API
+        count = typer.prompt("Сколько аккаунтов купить?", type=int)
+        # Вызываем команду accounts buy
+        ctx.invoke(accounts_buy, count=count)
+        # Помещаем полученные .session-файлы в папку sessions и проверяем авторизацию
+        console.print("\n[bold cyan]Помещаем полученные файлы сессий в папку sessions и проверяем их авторизацию...[/]")
+        ctx.invoke(check_sessions)
     else:
         console.print("Выход.")
 

@@ -2,7 +2,7 @@ import asyncio, shutil
 from pathlib import Path
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
-from hydra_reposter.core.config import settings
+from hydra_reposter.core import settings
 
 SESS_DIR = Path("sessions")
 DEAD_DIR = Path("dead_sessions"); DEAD_DIR.mkdir(exist_ok=True)

@@ -6,7 +6,7 @@ from typing import List
 from telethon import TelegramClient
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon.errors import SessionPasswordNeededError, UserAlreadyParticipantError
-from hydra_reposter.core.config import settings
+from hydra_reposter.core import settings
 from hydra_reposter.core.errors import AuthRequired
 from hydra_reposter.utils.quarantine import is_quarantined, add_quarantine
 
