@@ -6,6 +6,7 @@ __pycache__/
 *.egg-info/
 
 # Virtualenv
+.venv/
 
 # IDE
 .idea/
