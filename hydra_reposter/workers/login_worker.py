@@ -5,6 +5,7 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
 from hydra_reposter.core.accounts_service import LolzMarketClient, LolzApiError
+from hydra_reposter.core.proxy_service import ProxyManager
 from hydra_reposter.core.config import settings
 
 
@@ -71,9 +72,12 @@ def run_login_for_all(
     clients: list[TelegramClient] = []
 
     async def _run_all():
-        for session_path, proxy, item_id in zip(sessions, proxies, item_ids):
+        pm = ProxyManager()
+        for session_path, item_id in zip(sessions, item_ids):
+            proxy = await pm.acquire()
             client = await login_account(session_path, proxy, item_id)
             clients.append(client)
+        await pm.aclose()
 
     asyncio.run(_run_all())
     return clients
