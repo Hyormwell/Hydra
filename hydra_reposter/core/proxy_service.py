@@ -61,13 +61,15 @@ class AnyIPBackend:
 #                           Proxy-Seller backend                        #
 # --------------------------------------------------------------------- #
 class ProxySellerBackend:
-    BASE = "https://proxy-seller.com/personal/api/v1"
+    BASE_URL: str = "https://proxy-seller.com"
+    API_PREFIX: str = "/personal/api/v1"
+    BASE: str = BASE_URL + API_PREFIX
 
     def __init__(self):
         self.token = os.getenv("PROXYSELLER_TOKEN")
         self.proxy_id = os.getenv("PROXYSELLER_ID")
         self._client = httpx.AsyncClient(
-            base_url=f"{self.BASE}/{self.token}",
+            base_url=self.BASE,
             timeout=10.0,
             limits=httpx.Limits(max_connections=10),
         )
@@ -75,7 +77,7 @@ class ProxySellerBackend:
     @retry_on_5xx
     async def acquire(self) -> ProxyTuple:
         # GET /proxy/info/{id}
-        r = await self._client.get(f"/proxy/info/{self.proxy_id}")
+        r = await self._client.get(f"/{self.token}/proxy/info/{self.proxy_id}")
         r.raise_for_status()
         data = r.json()
         host, port = data["ip"], int(data["port"])
@@ -86,7 +88,8 @@ class ProxySellerBackend:
     async def rotate(self) -> bool:
         # POST /proxy/change-ip
         r = await self._client.post(
-            f"/proxy/change-ip", json={"proxyId": self.proxy_id}
+            f"/{self.token}/proxy/change-ip",
+            json={"proxyId": self.proxy_id},
         )
         r.raise_for_status()
         return bool(r.json().get("success"))

@@ -10,6 +10,8 @@ import asyncio
 from pathlib import Path
 from typing import Optional, List
 
+from telethon import TelegramClient
+
 from hydra_reposter.core.accounts_service import LolzMarketClient, LolzApiError
 from hydra_reposter.core.proxy_service import ProxyManager, ProxyError
 
@@ -26,10 +28,52 @@ from hydra_reposter.utils.metrics import inc_metric  # для демо-отчё�
 from hydra_reposter.utils.quarantine import is_quarantined
 from hydra_reposter.workers.reposter import run_reposter
 
+import httpx  # ↓ helper to find a cheap autor eg account
+
+from hydra_reposter.core.db import init_db, get_session, Account
+
+BASE_MARKET_URL = "https://prod-api.lzt.market"
+
+async def find_item(price_rub_cents: int) -> tuple[int, float] | None:
+    """
+    Найти самый дешёвый авторег‑аккаунт без пароля/спамблока ≤ указанной цены.
+
+    Parameters
+    ----------
+    price_rub_cents : int
+        Порог цены в копейках (50 → 0.50₽).
+
+    Returns
+    -------
+    (item_id, price) или None, если лотов нет.
+    """
+    params = {
+        "sectionId": 151,
+        "pmax": price_rub_cents,
+        "filters[autorag]": 1,
+        "filters[nopass]": 1,
+        "filters[nospamblock]": 1,
+        "sort": "price_to_up",
+        "limit": 1,
+    }
+    async with httpx.AsyncClient(
+        base_url=BASE_MARKET_URL,
+        headers={"Authorization": f"Bearer {settings.lolz_token}"}
+    ) as c:
+        r = await c.get("/telegram", params=params, timeout=60.0)
+        r.raise_for_status()
+        items = r.json().get("items", [])
+        if not items:
+            return None
+        itm = items[0]
+        return itm["item_id"], float(itm["price"])
+
+
 app = typer.Typer(add_completion=False, help="Hydra Reposter — модульная пересылка сообщений в Telegram")
 console = Console()
 
-
+DEFAULT_CSV = Path("data/targets.csv")
+DEFAULT_DONOR = "https://t.me/+AtkcqZPW5kM1Y2Jl"  # значение по умолчанию – меняется только в коде
 # --------------------------------------------------------------------------- #
 #  Красивый баннер
 # --------------------------------------------------------------------------- #
@@ -51,14 +95,16 @@ def print_banner() -> None:
 # --------------------------------------------------------------------------- #
 @app.command(help="Запустить перепост из CSV")
 def send(
-        csv_file: Path = typer.Option("data/targets.csv", "--csv", "-c"),
-        donor: Optional[str] = typer.Option("https://t.me/+AtkcqZPW5kM1Y2Jl", "--donor", "-d"),
-        mode: str = typer.Option("slow", "--mode", "-m"),
+        donor: Optional[str] = typer.Option(None, "--donor", "-d", help="Ссылка на донор‑чат"),
+        mode: str = typer.Option("slow", "--mode", "-m", help="Режим работы: slow|fast"),
         ids: List[int] = typer.Option([1], "--id", help="ID сообщений"),
+        dry_run: bool = typer.Option(False, "--dry-run", help="Не отправлять сообщения, только лог"),
 ):
     """Команда: старт пересылки"""
     console.print(Spinner("dots", text="Загружаю CSV…"), end="\r")
-    targets = [int(t) if str(t).isdigit() else t for t in load_targets_from_csv(csv_file)]
+    targets = [int(t) if str(t).isdigit() else t for t in load_targets_from_csv(DEFAULT_CSV)]
+    # если донор не передан через CLI – используем константу
+    donor = donor or DEFAULT_DONOR
     console.print(f"[bold cyan]Целей:[/] {len(targets)}")
 
     #Проверяем какие сессии активны
@@ -70,7 +116,9 @@ def send(
         console.print(f"[yellow]Пропущено сессий (карантин/не авторизованы): {dead}[/]")
 
     # Запуск репостера
-    run_reposter(csv_file, donor, sessions_dir, mode, ids)
+    if dry_run:
+        console.print("[yellow]Dry‑run: сообщения не будут реально отправлены[/]")
+    run_reposter(DEFAULT_CSV, donor, sessions_dir, mode, ids, dry_run=dry_run)
 
     console.print("\n[bold green]Готово![/]")
     console.print(f"Отправлено: {get_metric('sent')}, пропущено: {get_metric('skipped')}")
@@ -78,19 +126,38 @@ def send(
 
 @app.command("check-sessions", help="Проверить авторизацию всех .session")
 def check_sessions():
-    sessions = Path(settings.sessions_dir).glob("*.session")
+    init_db()
+    db = get_session()
+    sessions = list(Path(settings.sessions_dir).glob("*.session"))
     ok, bad = 0, 0
-    for s in sessions:
+    for sess_path in sessions:
+        fname = sess_path.name
         try:
-            # быстрая проверка через context manager
-            from hydra_reposter.core.client import telegram_client
+            async def test_auth(path):
+                client = TelegramClient(str(path), settings.api_id, settings.api_hash)
+                await client.connect()
+                if not await client.is_user_authorized():
+                    raise Exception("Unauthorized")
+                me = await client.get_me()
+                await client.disconnect()
+                return me
 
-            asyncio.run(telegram_client(s).__aenter__())
-            console.print(f"[green]OK[/] {s.name}")
+            me = asyncio.run(test_auth(sess_path))
+            console.print(f"[green]OK[/] {fname} — @{me.username or me.id}")
             ok += 1
+            rec = db.query(Account).filter(Account.item_id == int(fname.split(".")[0])).first()
+            if rec:
+                rec.status = "ok"
+                db.add(rec)
+                db.commit()
         except Exception as e:
-            console.print(f"[red]FAIL[/] {s.name} — {e}")
+            console.print(f"[red]FAIL[/] {fname} — {e}")
             bad += 1
+            rec = db.query(Account).filter(Account.item_id == int(fname.split(".")[0])).first()
+            if rec:
+                rec.status = "fail"
+                db.add(rec)
+                db.commit()
     console.print(f"\nИтого: OK {ok}, Ошибок {bad}")
 
 
@@ -124,17 +191,119 @@ def accounts_buy(
     """
     console = Console()
     async def _buy():
+        success = 0
+        attempts = 0
         async with LolzMarketClient() as client:
-            success = 0
-            for _ in range(count):
+            # крутим пока не купим нужное количество или не превысим лимит попыток
+            while success < count and attempts < count * 6:
+                attempts += 1
                 try:
-                    res = await client.fast_buy(item_id=settings.market_item_id, price=settings.market_price)
-                    console.print(f"[green]Куплен аккаунт:[/] lock_id={res['lock_id']}, item_id={res['item_id']}")
+                    # определяем лот: берём из конфига или ищем самый дешёвый
+                    if settings.market_item_id == 0:
+                        found = await find_item(int(settings.market_price * 100))
+                        if not found:
+                            console.print("[yellow]Нет подходящих лотов по цене[/]")
+                            break
+                        item_id, real_price = found
+                    else:
+                        item_id = settings.market_item_id
+                        real_price = settings.market_price
+
+                    res = await client.fast_buy(
+                        item_id=item_id,
+                        price=real_price,
+                    )
+                    purchased = res.get("item", {})
+                    console.print(
+                        f"[green]Куплен аккаунт:[/] item_id={purchased.get('item_id')}, "
+                        f"price={purchased.get('price', real_price)}"
+                    )
+                    # --- сохранить .session в папку sessions -----------------
+                    try:
+                        sess_bytes = await client.download_session(item_id)
+                        sess_path = Path(settings.sessions_dir) / f"{item_id}.session"
+                        sess_path.write_bytes(sess_bytes)
+                        console.print(f"[blue]Сохранён .session → {sess_path.name}[/]")
+                        # --- store in DB ---
+                        with get_session() as db:
+                            acc = Account(
+                                phone=f"tg://{purchased.get('item_id')}",
+                                proxy_id=None,
+                                status="purchased",
+                                session_path=str(sess_path),
+                                item_id=item_id
+                            )
+                            db.add(acc)
+                            db.commit()
+                    except Exception as dl_err:
+                        console.print(f"[yellow]Не удалось скачать .session:[/] {dl_err}")
                     success += 1
                 except LolzApiError as e:
+                    txt = str(e)
+                    if "очереди на автоматическую покупку" in txt:
+                        console.print("[yellow]Лот в авто‑очереди, пытаем другой через 1 с…[/]")
+                        await asyncio.sleep(1)
+                        continue
+                    if "недостаточно средств" in txt:
+                        console.print("[red]Недостаточно средств на балансе Market. Покупка остановлена.[/]")
+                        break
                     console.print(f"[red]Ошибка покупки:[/] {e}")
-            console.print(f"\n[bold green]Успешно куплено {success} из {count}[/]")
-    asyncio.run(_buy())
+                except httpx.ReadTimeout:
+                    console.print("[yellow]Timeout на запросе, повторяем позже…[/]")
+                    continue
+        if success < count:
+            console.print(f"[yellow]Не удалось купить все аккаунты "
+                          f"({success}/{count}) после {attempts} попыток.[/]")
+        console.print(f"Успешно куплено: {success}/{count}")
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        loop.run_until_complete(_buy())
+    else:
+        asyncio.run(_buy())
+
+@accounts_app.command("sync", help="Скачать сессии уже купленных аккаунтов")
+def accounts_sync():
+    """
+    Проверяет профиль LolzMarket, скачивает .session всех купленных
+    аккаунтов, которых нет в папке sessions.
+    """
+    console = Console()
+
+    async def _sync():
+        added = 0
+        async with LolzMarketClient() as client:
+            items = await client.list_paid_items()
+            for itm in items:
+                iid = itm["item_id"]
+                sess_path = Path(settings.sessions_dir) / f"{iid}.session"
+                if sess_path.exists():
+                    continue  # уже есть
+                try:
+                    data = await client.download_session(iid)
+                    sess_path.write_bytes(data)
+                    console.print(f"[blue]Добавлен {sess_path.name} (price {itm['price']})[/]")
+                    with get_session() as db:
+                        acc = Account(
+                            phone="unknown",
+                            proxy_id=None,
+                            status="synced",
+                            session_path=str(sess_path),
+                            item_id=iid
+                        )
+                        db.add(acc)
+                        db.commit()
+                    added += 1
+                except Exception as err:
+                    console.print(f"[yellow]Не скачан item {iid}: {err}[/]")
+
+        console.print(f"[green]Синхронизация завершена. Файлов добавлено: {added}[/]")
+
+    asyncio.run(_sync())
 
 # --------------------------------------------------------------------------- #
 #  Sub-command group: proxies
@@ -172,6 +341,7 @@ def proxies_rotate(
 # --------------------------------------------------------------------------- #
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context):
+    init_db()
     print_banner()
     if ctx.invoked_subcommand:
         return
@@ -181,14 +351,13 @@ def main(ctx: typer.Context):
                   " [blue]2[/] — Проверить сессии\n"
                   " [blue]3[/] — Показать метрики\n"
                   " [blue]4[/] — Купить аккаунты\n"
+                  " [blue]5[/] — Синхронизировать купленные\n"
                   " [blue]0[/] — Выход")
 
     choice = typer.prompt("Номер", type=int)
     if choice == 1:
-        csv_path = Path(typer.prompt("CSV-файл"))
-        donor = typer.prompt("Донор (@… или ID)", default="")
         mode = typer.prompt("Режим (slow/fast)", default="slow")
-        ctx.invoke(send, csv_file=csv_path, donor=donor or None, mode=mode)
+        ctx.invoke(send, mode=mode)
     elif choice == 2:
         ctx.invoke(check_sessions)
     elif choice == 3:
@@ -201,6 +370,8 @@ def main(ctx: typer.Context):
         # Помещаем полученные .session-файлы в папку sessions и проверяем авторизацию
         console.print("\n[bold cyan]Помещаем полученные файлы сессий в папку sessions и проверяем их авторизацию...[/]")
         ctx.invoke(check_sessions)
+    elif choice == 5:
+        ctx.invoke(accounts_sync)
     else:
         console.print("Выход.")
 

@@ -33,11 +33,49 @@ class LolzMarketClient:
     def __init__(self, token: Optional[str] = None, *, timeout: float = 15.0) -> None:
         self._client = httpx.AsyncClient(
             base_url=self.BASE_URL,
-            headers={"Authorization": f"Bearer {token or settings.LOLZ_TOKEN}"},
+            headers={"Authorization": f"Bearer {token or settings.lolz_token}"},
             timeout=timeout,
             limits=httpx.Limits(max_connections=30, max_keepalive_connections=10),
         )
 
+    # ------------------------------------------------------------------ #
+    #  Download .session helper
+    # ------------------------------------------------------------------ #
+    async def download_session(self, item_id: int) -> bytes:
+        """
+        Скачать .session-файл купленного Telegram-аккаунта.
+
+        Parameters
+        ----------
+        item_id : int
+            ID товара (item_id), уже оплаченного.
+
+        Returns
+        -------
+        bytes
+            Содержимое файла (.session) в raw-виде.
+        """
+        resp = await self._client.get(f"/{item_id}/download", timeout=30.0)
+        resp.raise_for_status()
+        return resp.content
+
+    # ------------------------------------------------------------------ #
+    #  List already purchased Telegram accounts                          #
+    # ------------------------------------------------------------------ #
+    async def list_paid_items(self) -> list[dict]:
+        """
+        Вернуть список всех купленных (paid) телеграм-аккаунтов
+        текущего пользователя Market.
+
+        Returns
+        -------
+        list[dict]
+            Список словарей с ключами item_id, price и др.
+        """
+        params = {"state": "paid", "sectionId": 151, "limit": 100}
+        resp = await self._client.get("/user/orders", params=params, timeout=30.0)
+        resp.raise_for_status()
+        return resp.json().get("items", [])
     # -------------------------------------------------------------------- #
     # private helpers
     # -------------------------------------------------------------------- #
