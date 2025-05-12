@@ -1,5 +1,8 @@
 from typing import Optional, List
 from sqlmodel import SQLModel, Field, create_engine, Session
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from hydra_reposter.core.config import settings
 
 # Модель таблицы accounts
 class Account(SQLModel, table=True):
@@ -10,13 +13,11 @@ class Account(SQLModel, table=True):
     session_path: str
     item_id: int
 
-# Подключение к БД
-from hydra_reposter.core.config import settings
-DB_URL = settings.db_url or f"sqlite:///{settings.sessions_dir}/accounts.db"
-engine = create_engine(DB_URL, echo=False)
+engine = create_engine(settings.DB_URL, echo=False)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db() -> None:
     SQLModel.metadata.create_all(engine)
 
 def get_session() -> Session:
-    return Session(engine)
+    return SessionLocal()

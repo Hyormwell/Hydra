@@ -68,6 +68,7 @@ class ProxySellerBackend:
     def __init__(self):
         self.token = os.getenv("PROXYSELLER_TOKEN")
         self.proxy_id = os.getenv("PROXYSELLER_ID")
+        # Use BASE exactly as base_url (no trailing slash) so tests can mock correctly
         self._client = httpx.AsyncClient(
             base_url=self.BASE,
             timeout=10.0,
@@ -76,7 +77,7 @@ class ProxySellerBackend:
 
     @retry_on_5xx
     async def acquire(self) -> ProxyTuple:
-        # GET /proxy/info/{id}
+        # include token in path for API calls
         r = await self._client.get(f"/{self.token}/proxy/info/{self.proxy_id}")
         r.raise_for_status()
         data = r.json()
@@ -86,7 +87,7 @@ class ProxySellerBackend:
 
     @retry_on_5xx
     async def rotate(self) -> bool:
-        # POST /proxy/change-ip
+        # include token in path for API calls
         r = await self._client.post(
             f"/{self.token}/proxy/change-ip",
             json={"proxyId": self.proxy_id},

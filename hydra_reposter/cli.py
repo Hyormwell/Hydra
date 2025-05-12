@@ -16,6 +16,7 @@ from hydra_reposter.core.accounts_service import LolzMarketClient, LolzApiError
 from hydra_reposter.core.proxy_service import ProxyManager, ProxyError
 
 import typer
+import httpx
 from rich.console import Console
 from rich.spinner import Spinner
 from rich.panel import Panel
@@ -28,7 +29,6 @@ from hydra_reposter.utils.metrics import inc_metric  # для демо-отчё�
 from hydra_reposter.utils.quarantine import is_quarantined
 from hydra_reposter.workers.reposter import run_reposter
 
-import httpx  # ↓ helper to find a cheap autor eg account
 
 from hydra_reposter.core.db import init_db, get_session, Account
 
@@ -47,6 +47,7 @@ async def find_item(price_rub_cents: int) -> tuple[int, float] | None:
     -------
     (item_id, price) или None, если лотов нет.
     """
+    import httpx
     params = {
         "sectionId": 151,
         "pmax": price_rub_cents,
@@ -130,35 +131,52 @@ def check_sessions():
     db = get_session()
     sessions = list(Path(settings.sessions_dir).glob("*.session"))
     ok, bad = 0, 0
+
+    def ensure_account(db, item_id, session_path):
+        acc = db.query(Account).filter(Account.item_id == item_id).first()
+        if not acc:
+            acc = Account(
+                phone=f"tg://{item_id}",
+                proxy_id=None,
+                status="unknown",
+                session_path=session_path,
+                item_id=item_id
+            )
+            db.add(acc)
+            db.commit()
+            db.refresh(acc)
+        return acc
+
+    async def test_auth(path):
+        client = TelegramClient(str(path), settings.api_id, settings.api_hash)
+        await client.connect()
+        if not await client.is_user_authorized():
+            raise Exception("Unauthorized")
+        me = await client.get_me()
+        await client.disconnect()
+        return me
+
     for sess_path in sessions:
         fname = sess_path.name
-        try:
-            async def test_auth(path):
-                client = TelegramClient(str(path), settings.api_id, settings.api_hash)
-                await client.connect()
-                if not await client.is_user_authorized():
-                    raise Exception("Unauthorized")
-                me = await client.get_me()
-                await client.disconnect()
-                return me
+        item_id = int(fname.split(".")[0])
+        rec = ensure_account(db, item_id, str(sess_path))
 
+        try:
+            # тестим авторизацию…
             me = asyncio.run(test_auth(sess_path))
             console.print(f"[green]OK[/] {fname} — @{me.username or me.id}")
             ok += 1
-            rec = db.query(Account).filter(Account.item_id == int(fname.split(".")[0])).first()
-            if rec:
-                rec.status = "ok"
-                db.add(rec)
-                db.commit()
+            rec.status = "ok"
+            db.add(rec);
+            db.commit()
         except Exception as e:
             console.print(f"[red]FAIL[/] {fname} — {e}")
             bad += 1
-            rec = db.query(Account).filter(Account.item_id == int(fname.split(".")[0])).first()
-            if rec:
-                rec.status = "fail"
-                db.add(rec)
-                db.commit()
-    console.print(f"\nИтого: OK {ok}, Ошибок {bad}")
+            rec.status = "fail"
+            db.add(rec);
+            db.commit()
+
+        console.print(f"\nИтого: OK {ok}, Ошибок {bad}")
 
 
 @app.command(help="Показать текущие метрики")
@@ -194,72 +212,76 @@ def accounts_buy(
         success = 0
         attempts = 0
         async with LolzMarketClient() as client:
-            # крутим пока не купим нужное количество или не превысим лимит попыток
-            while success < count and attempts < count * 6:
-                attempts += 1
-                try:
-                    # определяем лот: берём из конфига или ищем самый дешёвый
-                    if settings.market_item_id == 0:
-                        found = await find_item(int(settings.market_price * 100))
-                        if not found:
-                            console.print("[yellow]Нет подходящих лотов по цене[/]")
-                            break
-                        item_id, real_price = found
-                    else:
-                        item_id = settings.market_item_id
-                        real_price = settings.market_price
-
-                    res = await client.fast_buy(
-                        item_id=item_id,
-                        price=real_price,
-                    )
-                    purchased = res.get("item", {})
-                    console.print(
-                        f"[green]Куплен аккаунт:[/] item_id={purchased.get('item_id')}, "
-                        f"price={purchased.get('price', real_price)}"
-                    )
-                    # --- сохранить .session в папку sessions -----------------
+            try:
+                # крутим пока не купим нужное количество или не превысим лимит попыток
+                while success < count and attempts < count * 6:
+                    attempts += 1
                     try:
-                        sess_bytes = await client.download_session(item_id)
-                        sess_path = Path(settings.sessions_dir) / f"{item_id}.session"
-                        sess_path.write_bytes(sess_bytes)
-                        console.print(f"[blue]Сохранён .session → {sess_path.name}[/]")
-                        # --- store in DB ---
-                        with get_session() as db:
-                            acc = Account(
-                                phone=f"tg://{purchased.get('item_id')}",
-                                proxy_id=None,
-                                status="purchased",
-                                session_path=str(sess_path),
-                                item_id=item_id
-                            )
-                            db.add(acc)
-                            db.commit()
-                    except Exception as dl_err:
-                        console.print(f"[yellow]Не удалось скачать .session:[/] {dl_err}")
-                    success += 1
-                except LolzApiError as e:
-                    txt = str(e)
-                    if "очереди на автоматическую покупку" in txt:
-                        console.print("[yellow]Лот в авто‑очереди, пытаем другой через 1 с…[/]")
-                        await asyncio.sleep(1)
+                        # определяем лот: берём из конфига или ищем самый дешёвый
+                        if settings.market_item_id == 0:
+                            found = await find_item(int(settings.market_price * 100))
+                            if not found:
+                                console.print("[yellow]Нет подходящих лотов по цене[/]")
+                                break
+                            item_id, real_price = found
+                        else:
+                            item_id = settings.market_item_id
+                            real_price = settings.market_price
+
+                        res = await client.fast_buy(
+                            item_id=item_id,
+                            price=real_price,
+                        )
+                        purchased = res.get("item", {})
+                        console.print(
+                            f"[green]Куплен аккаунт:[/] item_id={purchased.get('item_id')}, price={purchased.get('price', real_price)}"
+                        )
+                        # --- сохранить .session в папку sessions -----------------
+                        try:
+                            sess_bytes = await client.download_session(item_id)
+                            sess_path = Path(settings.sessions_dir) / f"{item_id}.session"
+                            sess_path.write_bytes(sess_bytes)
+                            console.print(f"[blue]Сохранён .session → {sess_path.name}[/]")
+                            # --- store in DB ---
+                            with get_session() as db:
+                                acc = Account(
+                                    phone=f"tg://{purchased.get('item_id')}",
+                                    proxy_id=None,
+                                    status="purchased",
+                                    session_path=str(sess_path),
+                                    item_id=item_id
+                                )
+                                db.add(acc)
+                                db.commit()
+                            success += 1
+                        except Exception as dl_err:
+                            console.print(f"[yellow]Не удалось скачать .session:[/] {dl_err}")
+                    except LolzApiError as e:
+                        txt = str(e)
+                        if "очереди на автоматическую покупку" in txt:
+                            console.print("[yellow]Лот в авто‑очереди, пытаем другой через 1 с…[/]")
+                            await asyncio.sleep(1)
+                            continue
+                        if "недостаточно средств" in txt:
+                            console.print("[red]Недостаточно средств на балансе Market. Покупка остановлена.[/]")
+                            break
+                        console.print(f"[red]Ошибка покупки:[/] {e}")
+                    except httpx.ReadTimeout:
+                        console.print("[yellow]Timeout на запросе, повторяем позже…[/]")
                         continue
-                    if "недостаточно средств" in txt:
-                        console.print("[red]Недостаточно средств на балансе Market. Покупка остановлена.[/]")
-                        break
-                    console.print(f"[red]Ошибка покупки:[/] {e}")
-                except httpx.ReadTimeout:
-                    console.print("[yellow]Timeout на запросе, повторяем позже…[/]")
-                    continue
-        if success < count:
-            console.print(f"[yellow]Не удалось купить все аккаунты "
-                          f"({success}/{count}) после {attempts} попыток.[/]")
-        console.print(f"Успешно куплено: {success}/{count}")
+            except Exception as exc:
+                console.print(f"[red]Непредвиденная ошибка при покупке:[/] {exc}")
+            if success < count:
+                console.print(f"[yellow]Не удалось купить все аккаунты "
+                            f"({success}/{count}) после {attempts} попыток.[/]")
+            console.print(f"Успешно куплено: {success}/{count}")
     import asyncio
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
+
 
     if loop and loop.is_running():
         loop.run_until_complete(_buy())
@@ -275,6 +297,7 @@ def accounts_sync():
     console = Console()
 
     async def _sync():
+        import httpx
         added = 0
         async with LolzMarketClient() as client:
             items = await client.list_paid_items()
