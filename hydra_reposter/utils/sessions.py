@@ -1,93 +1,136 @@
-# hydra_reposter/utils/sessions.py
-from __future__ import annotations
-import shutil, time
 from pathlib import Path
 from typing import List
 from telethon import TelegramClient
-from telethon.tl.functions.messages import ImportChatInviteRequest
-from telethon.errors import SessionPasswordNeededError, UserAlreadyParticipantError
-from hydra_reposter.core import settings
-from hydra_reposter.core.errors import AuthRequired
-from hydra_reposter.utils.quarantine import is_quarantined, add_quarantine
+from telethon.sessions import StringSession
+import shutil
+import asyncio
+from telethon import errors
 from hydra_reposter.core.accounts_service import LolzMarketClient, LolzApiError
-from hydra_reposter.core.db import get_session, Account
+from hydra_reposter.core.db import get_session, Account, init_db
+from hydra_reposter.core import settings
 from rich.console import Console
-console = Console()
+from hydra_reposter.utils.quarantine import is_quarantined
 
-DEAD_DIR = Path("dead_sessions")
+console = Console()
+DEAD_DIR = Path(settings.sessions_dir) / "dead_sessions"
 DEAD_DIR.mkdir(exist_ok=True)
 
-async def load_live_clients(sessions_dir: Path) -> List[TelegramClient]:
+def ensure_account(db, item_id, session_path):
+    acc = db.query(Account).filter(Account.item_id == item_id).first()
+    if not acc:
+        acc = Account(
+            phone=f"tg://{item_id}",
+            proxy_id=None,
+            status="unknown",
+            session_path=session_path,
+            item_id=item_id
+        )
+        db.add(acc); db.commit(); db.refresh(acc)
+    return acc
+
+async def test_auth(path):
+    client = TelegramClient(str(path), settings.api_id, settings.api_hash)
+    await client.connect()
+    if not await client.is_user_authorized():
+        raise errors.AuthKeyError("Unauthorized")
+    me = await client.get_me()
+    await client.disconnect()
+    return me
+
+async def run_session_check():
+    init_db()
     db = get_session()
-    clients: List[TelegramClient] = []
+    sessions_dir = Path(settings.sessions_dir)
+    ok = bad = 0
     for sess_path in sessions_dir.glob("*.session"):
         fname = sess_path.name
         if is_quarantined(sess_path):
             continue
+        item_id = int(sess_path.stem)
+        rec = ensure_account(db, item_id, str(sess_path))
         lolz = LolzMarketClient()
-        client = TelegramClient(str(sess_path), settings.api_id, settings.api_hash)
-        try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                # Try to authorize via Lolz API
-                try:
-                    code = lolz.get_code(item_id=Path(sess_path).stem)
-                    await client.sign_in(code=code)
-                except LolzApiError as api_err:
-                    raise AuthRequired(f"lolz API failed: {api_err}")
-                if not await client.is_user_authorized():
-                    raise AuthRequired("authorization failed after code")
-            clients.append(client)
-        except AuthRequired:
-            # Attempt to authorize session using Lolz API code
-            item_id = int(sess_path.stem)
-            rec = db.query(Account).filter(Account.item_id == item_id).first()
-            try:
-                code = lolz.get_code(item_id=item_id)
-                console.print(f"[blue]Signing in {fname} with code from Lolz API[/]")
-                await client.sign_in(code=code)
-                if await client.is_user_authorized():
-                    console.print(f"[green]Authorized[/] {fname} after code")
-                    rec.status = "ok"
-                    db.add(rec)
-                    db.commit()
-                    clients.append(client)
-                    continue  # move to next session
-                else:
-                    raise AuthRequired("authorization failed after API code")
-            except LolzApiError as api_err:
-                console.print(f"[red]Lolz API error for {fname}: {api_err}[/]")
-            except Exception as auth_err:
-                console.print(f"[red]Auth retry failed for {fname}: {auth_err}[/]")
 
-            # If we reach here, authorization failed—mark and move to dead
-            rec.status = "fail"
+        try:
+            # First attempt: normal session connect
+            me = await test_auth(sess_path)
+            console.print(f"[green]OK[/] {fname} — @{me.username or me.id}")
+            rec.status = "ok"
+            ok += 1
+        except Exception:
+            # Need to login via Telethon
+            console.print(f"[yellow]Attempting Telethon login for {fname}[/]")
+            client = TelegramClient(StringSession(), settings.api_id, settings.api_hash)
+            await client.connect()
+            try:
+                # Fetch login and password from Lolz API
+                try:
+                    account_info = await lolz.get_account(item_id=item_id)
+                    # Extract the actual item data
+                    item_data = account_info.get('item', {})
+                    # Try common fields for phone/login
+                    phone = item_data.get('login') or item_data.get('phone') or item_data.get('username')
+                    password = item_data.get('password')
+                    if not phone:
+                        console.print(f"[red]No phone/login returned for {fname}. Item keys: {list(item_data.keys())}[/]")
+                        rec.status = "fail"; bad += 1
+                        shutil.move(sess_path, DEAD_DIR / fname)
+                        db.add(rec); db.commit()
+                        continue
+                except Exception as acc_err:
+                    console.print(f"[red]Failed to fetch account info for {fname}: {acc_err}[/]")
+                    rec.status = "fail"; bad += 1
+                    shutil.move(sess_path, DEAD_DIR / fname)
+                    db.add(rec); db.commit()
+                    continue
+
+                # request login via phone number
+                await client.send_code_request(phone)
+                code = await lolz.get_code(item_id=item_id)
+                await client.sign_in(phone, code)
+            except errors.SessionPasswordNeededError:
+                # 2FA password needed
+                if password:
+                    await client.sign_in(password=password)
+                else:
+                    console.print(f"[red]2FA password needed but no password provided for {fname}[/]")
+                    rec.status = "fail"
+                    bad += 1
+                    shutil.move(sess_path, DEAD_DIR / fname)
+                    db.add(rec); db.commit()
+                    await client.disconnect()
+                    continue
+            except Exception as login_err:
+                console.print(f"[red]Login failed for {fname}: {login_err}[/]")
+                rec.status = "fail"
+                bad += 1
+                shutil.move(sess_path, DEAD_DIR / fname)
+                db.add(rec); db.commit()
+                await client.disconnect()
+                continue
+            # on success, save session to disk
+            client.session.save(str(sess_path))
+            me = await client.get_me()
+            console.print(f"[green]Authorized[/] {fname} — @{me.username or me.id}")
+            rec.status = "ok"; ok += 1
             db.add(rec); db.commit()
             await client.disconnect()
-            shutil.move(sess_path, DEAD_DIR / fname)
-            console.print(f"[yellow]Moved invalid session to dead: {fname}[/]")
-        except SessionPasswordNeededError:
-            # Mark session as 2FA protected in DB
-            item_id = int(sess_path.stem)
-            rec = db.query(Account).filter(Account.item_id == item_id).first()
-            if rec:
-                rec.status = "2fa_protected"
-                db.add(rec)
-                db.commit()
-            # аккаунт защищён 2FA — бесполезен для авто-спама
-            await client.disconnect()  # Закрываем
-            shutil.move(sess_path, DEAD_DIR / fname)  # Переносим
-    return clients
 
-async def resolve_donor(client: TelegramClient, donor_link: str):
+        db.add(rec); db.commit()
+
+    console.print(f"\nИтого: OK {ok}, Ошибок {bad}")
+
+
+# --- Заглушки для совместимости с репостером ---
+async def load_live_clients(sessions_dir: Path) -> List[TelegramClient]:
     """
-    Принимает invite-ссылку «https://t.me/+Abc...», если нужно — вступает,
-    и возвращает InputPeer донор-канала.
+    Заглушка для совместимости с репостером.
+    При необходимости, заменить на реальную логику загрузки и авторизации клиентов.
     """
-    if "+".encode() in donor_link.encode():
-        hash_ = donor_link.rsplit("+", maxsplit=1)[-1]
-        try:
-            await client(ImportChatInviteRequest(hash_))
-        except UserAlreadyParticipantError:
-            pass
-    return await client.get_input_entity(donor_link)
+    return []
+
+async def resolve_donor(client: TelegramClient, donor_link: str) -> str:
+    """
+    Заглушка для совместимости с репостером.
+    При необходимости, реализовать получение финального имени канала.
+    """
+    return donor_link

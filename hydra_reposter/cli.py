@@ -28,6 +28,7 @@ from hydra_reposter.utils.metrics import get_metric, snapshot, reset_metrics
 from hydra_reposter.utils.metrics import inc_metric  # для демо-отчёта
 from hydra_reposter.utils.quarantine import is_quarantined
 from hydra_reposter.workers.reposter import run_reposter
+from hydra_reposter.utils.sessions import run_session_check
 
 
 from hydra_reposter.core.db import init_db, get_session, Account
@@ -127,56 +128,9 @@ def send(
 
 @app.command("check-sessions", help="Проверить авторизацию всех .session")
 def check_sessions():
-    init_db()
-    db = get_session()
-    sessions = list(Path(settings.sessions_dir).glob("*.session"))
-    ok, bad = 0, 0
-
-    def ensure_account(db, item_id, session_path):
-        acc = db.query(Account).filter(Account.item_id == item_id).first()
-        if not acc:
-            acc = Account(
-                phone=f"tg://{item_id}",
-                proxy_id=None,
-                status="unknown",
-                session_path=session_path,
-                item_id=item_id
-            )
-            db.add(acc)
-            db.commit()
-            db.refresh(acc)
-        return acc
-
-    async def test_auth(path):
-        client = TelegramClient(str(path), settings.api_id, settings.api_hash)
-        await client.connect()
-        if not await client.is_user_authorized():
-            raise Exception("Unauthorized")
-        me = await client.get_me()
-        await client.disconnect()
-        return me
-
-    for sess_path in sessions:
-        fname = sess_path.name
-        item_id = int(fname.split(".")[0])
-        rec = ensure_account(db, item_id, str(sess_path))
-
-        try:
-            # тестим авторизацию…
-            me = asyncio.run(test_auth(sess_path))
-            console.print(f"[green]OK[/] {fname} — @{me.username or me.id}")
-            ok += 1
-            rec.status = "ok"
-            db.add(rec);
-            db.commit()
-        except Exception as e:
-            console.print(f"[red]FAIL[/] {fname} — {e}")
-            bad += 1
-            rec.status = "fail"
-            db.add(rec);
-            db.commit()
-
-        console.print(f"\nИтого: OK {ok}, Ошибок {bad}")
+    """Запускает асинхронную проверку сессий."""
+    import asyncio
+    asyncio.run(run_session_check())
 
 
 @app.command(help="Показать текущие метрики")
