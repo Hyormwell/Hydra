@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, Optional
-
+import json
 import backoff
 import httpx
 
@@ -108,7 +108,14 @@ class LolzMarketClient:
     @backoff.on_exception(backoff.expo, httpx.HTTPStatusError, max_time=60)
     async def get_account(self, item_id: int) -> Dict[str, Any]:
         resp = await self._client.get(f"/{item_id}")
-        return await self._handle_response(resp)
+        raw = await self._handle_response(resp)
+        item = raw.get("item", {})
+        tg_raw = item.get("telegram_json") or "{}"
+        try:
+            item["telegram_json"] = json.loads(tg_raw)
+        except json.JSONDecodeError:
+            item["telegram_json"] = {}
+        return raw
 
     @backoff.on_exception(backoff.expo, httpx.HTTPStatusError, max_time=60)
     async def get_code(self, item_id: int) -> Optional[str]:

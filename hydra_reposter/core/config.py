@@ -9,7 +9,14 @@ class Settings(BaseSettings):
     api_hash: Optional[str] = PydanticField(None, alias="API_HASH")
 
     # ----- Покупка аккаунтов -----------------------------------------------------
-    lolz_token: Optional[str] = PydanticField(None, alias="LOLZ_TOKEN")
+    lolz_token: Optional[str] = PydanticField(None, alias="LOLZ_API_KEY")
+
+    # Back‑compat: allow referencing `settings.lolz_api_key`
+    @property
+    def lolz_api_key(self) -> Optional[str]:
+        """Alias that mirrors *lolz_token* so old code keeps working."""
+        return self.lolz_token
+
     market_item_id: int = PydanticField(..., env="MARKET_ITEM_ID")
     market_price: float = PydanticField(0.5, env="MARKET_PRICE")
 
@@ -41,6 +48,12 @@ class Settings(BaseSettings):
     default_delay: float = PydanticField(1.0, alias="DEFAULT_DELAY")
     floodwait_threshold: int = PydanticField(1800, alias="FLOODWAIT_THRESHOLD")
     peerflood_threshold: int = PydanticField(3, alias="PEERFLOOD_THRESHOLD")
+
+    # ----- Дополнительные параметры -----------------------------------------
+    device_model: str = PydanticField("HydraReposter", alias="DEVICE_MODEL")
+    lolz_api_base_url: str = PydanticField("https://api.lzt.market", alias="LOLZ_API_BASE_URL")
+    log_level: str = PydanticField("INFO", alias="LOG_LEVEL")
+    debug: bool = PydanticField(False, alias="DEBUG")
 
     # ----- Конфиг Pydantic --------------------------------------------------
     model_config = SettingsConfigDict(

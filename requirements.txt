@@ -25,6 +25,7 @@ pytest-asyncio==0.23.5
 respx==0.21.1
 typer[all]==0.15.3
 httpcore>=0.17.0
+lolzteam==2.0.13
 
 # Networking & async HTTP
 httpx==0.27.0

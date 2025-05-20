@@ -6,10 +6,9 @@ Typer-приложение с баннером а-ля TGSpammer и интера
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Optional, List
-
+import asyncio
 from telethon import TelegramClient
 
 from hydra_reposter.core.accounts_service import LolzMarketClient, LolzApiError
@@ -28,10 +27,9 @@ from hydra_reposter.utils.metrics import get_metric, snapshot, reset_metrics
 from hydra_reposter.utils.metrics import inc_metric  # для демо-отчёта
 from hydra_reposter.utils.quarantine import is_quarantined
 from hydra_reposter.workers.reposter import run_reposter
-from hydra_reposter.utils.sessions import run_session_check
 
 
-from hydra_reposter.core.db import init_db, get_session, Account
+#from hydra_reposter.core.db import init_db, get_session, Account
 
 BASE_MARKET_URL = "https://prod-api.lzt.market"
 
@@ -127,10 +125,10 @@ def send(
 
 
 @app.command("check-sessions", help="Проверить авторизацию всех .session")
-def check_sessions():
+async def check_sessions():
     """Запускает асинхронную проверку сессий."""
-    import asyncio
-    asyncio.run(run_session_check())
+    from hydra_reposter.utils.sessions import run_session_check
+    await run_session_check()
 
 
 @app.command(help="Показать текущие метрики")
@@ -318,6 +316,8 @@ def proxies_rotate(
 # --------------------------------------------------------------------------- #
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context):
+    # Инициализация БД — делаем здесь, внутри callback, сразу перед первым обращением
+    from hydra_reposter.core.db import init_db
     init_db()
     print_banner()
     if ctx.invoked_subcommand:
@@ -336,7 +336,8 @@ def main(ctx: typer.Context):
         mode = typer.prompt("Режим (slow/fast)", default="slow")
         ctx.invoke(send, mode=mode)
     elif choice == 2:
-        ctx.invoke(check_sessions)
+        import asyncio
+        asyncio.run(check_sessions())
     elif choice == 3:
         ctx.invoke(dashboard)
     elif choice == 4:
