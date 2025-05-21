@@ -1,0 +1,38 @@
+annotated-types==0.7.0
+click==8.1.8
+markdown-it-py==3.0.0
+mdurl==0.1.2
+pyaes==1.6.1
+pyasn1==0.6.1
+pydantic==2.7.3
+# pydantic 2.7.x pulls the correct pydantic-core (>=2.18,<3); отдельный пин больше не нужен
+pydantic-settings==2.9.1
+Pygments==2.19.1
+PyQt5==5.15.11
+PyQt5-Qt5==5.15.16
+PyQt5_sip==12.17.0
+python-dotenv==1.1.0
+rich==14.0.0
+rsa==4.9.1
+shellingham==1.5.4
+Telethon>=1.40.0
+typing-inspection==0.4.0
+typing_extensions==4.13.2
+loguru==0.7.3
+tenacity==9.1.2
+pytest==8.3.5
+pytest-asyncio==0.23.5
+respx==0.21.1
+typer[all]==0.15.3
+httpcore>=0.17.0
+lolzteam==2.0.13
+
+# Networking & async HTTP
+httpx==0.27.0
+
+# Retry/back‑off helper
+backoff==2.2.1
+
+# SOCKS proxy support with asyncio
+python-socks[asyncio]==2.4.4
+TgCrypto-pyrofork==1.2.7
