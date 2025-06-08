@@ -127,6 +127,15 @@ class ProxyManager:
     async def rotate(self) -> bool:
         return await self.backend.rotate()
 
+    async def rotate_all(self) -> bool:
+        """Rotate all managed proxies.
+
+        Currently ``ProxyManager`` maintains a single backend instance.
+        This method mirrors :py:meth:`rotate` for API compatibility
+        and future extension when multiple proxies might be managed.
+        """
+        return await self.rotate()
+
     async def blacklist(self) -> bool:
         return await self.backend.blacklist()
 
